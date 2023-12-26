@@ -5,7 +5,7 @@ import { useChat } from "ai/react";
 import useSilenceAwareRecorder from "silence-aware-recorder/react";
 import useMediaRecorder from "@wmik/use-media-recorder";
 import mergeImages from "merge-images";
-
+import { useLocalStorage } from "../lib/use-local-storage";
 const INTERVAL = 250; // capture screenshot
 const IMAGE_WIDTH = 512;
 const IMAGE_QUALITY = 0.6;
@@ -16,7 +16,13 @@ const SILENT_THRESHOLD = -30;
  // divide for image
  const transparentPixel =
  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/wcAAwAB/2lXzAAAACV0RVh0ZGF0ZTpjcmVhdGU9MjAyMy0xMC0xOFQxNTo0MDozMCswMDowMEfahTAAAAAldEVYdGRhdGU6bW9kaWZ5PTIwMjMtMTAtMThUMTU6NDA6MzArMDA6MDBa8cKfAAAAAElFTkSuQmCC";
- 
+ function playAudio(url) {
+  return new Promise((resolve) => {
+    const audio = new Audio(url);
+    audio.onended = resolve;
+    audio.play();
+  });
+}
  async function getImageDimensions(src) {
    return new Promise((resolve, reject) => {
      const img = new globalThis.Image();
@@ -112,7 +118,8 @@ export default function Chat() {
   const [imagesGridUrl, setImagesGridUrl] = useState(null);
   const [currentVolume, setCurrentVolume] = useState(-50);
   const [volumePercentage, setVolumePercentage] = useState(0);
-
+  const [token, setToken] = useLocalStorage("ai-token", "");
+  const [lang, setLang] = useLocalStorage("lang", "");
  
   // setup media recorder
 
@@ -147,6 +154,28 @@ export default function Chat() {
     audio.stopRecording();
 
     // send audio whis for transcription
+    setPhase("user: processing speech to text");
+    
+    const token = JSON.parse(localStorage.getItem('ai-token'));
+    const lang = JSON.parse(localStorage.getItem('lang'));
+
+    const speechtotextFormData = new FormData();
+    speechtotextFormData.append("file", data, "audio.webm");
+    speechtotextFormData.append("token", token);
+    speechtotextFormData.append("lang", lang);
+
+    const speechtotextResponse = await fetch("/api/speechtotext", {
+      method: "POST",
+      body: speechtotextFormData,
+    });
+
+    const { text, error } = await speechtotextResponse.json();
+
+    if (error) {
+      alert(error);
+    }
+
+    setTranscription(text);
     setPhase("user: uploading video captures");
 
     // Keep only the last XXX screenshots
@@ -162,7 +191,54 @@ export default function Chat() {
     setImagesGridUrl(imageUrl);
 
     setPhase("user: processing completion");
+    await append({
+      content: [
+        text,
+        {
+          type: "image_url",
+          image_url: {
+            url: uploadUrl,
+          },
+        },
+      ],
+      role: "user",
+    });
   }
+  const { messages, append, reload, isLoading } = useChat({
+    id,
+    body: {
+      id,
+      token,
+      lang,
+    },
+    async onFinish(message) {
+      setPhase("assistant: processing text to speech");
+
+      // same here
+      const token = JSON.parse(localStorage.getItem("ai-token"));
+
+      const texttospeechFormData = new FormData();
+      texttospeechFormData.append("input", message.content);
+      texttospeechFormData.append("token", token);
+
+      const response = await fetch("/api/texttospeech", {
+        method: "POST",
+        body: texttospeechFormData,
+      });
+
+      setPhase("assistant: playing audio");
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      await playAudio(url);
+
+      audio.startRecording();
+      isBusy.current = false;
+
+      setPhase("user: waiting for speech");
+    },
+  });
+
   useEffect(() => {
     const captureFrame = () => {
       if (video.status === "recording" && audio.isRecording) {
@@ -231,6 +307,10 @@ export default function Chat() {
       }
     }
   }, [currentVolume, audio.isRecording]);
+
+  const lastAssistantMessage = messages
+  .filter((it) => it.role === "assistant")
+  .pop();
   return (
     <>
       <canvas ref={canvasRef} style={{ display: "none" }} />
@@ -259,6 +339,14 @@ export default function Chat() {
               </div>
             )}
           </div>
+          <div className="flex items-center justify-center p-12 text-md leading-relaxed relative">
+            {lastAssistantMessage?.content}
+            {isLoading && (
+              <div className="absolute left-50 top-50 w-8 h-8 ">
+                <div className="w-6 h-6 -mr-3 -mt-3 rounded-full bg-cyan-500 animate-ping" />
+              </div>
+            )}
+          </div>
         </div>
       </div>
       <div className="flex flex-wrap justify-center p-4 opacity-50 gap-2">
@@ -284,6 +372,19 @@ export default function Chat() {
           >
             Debug
           </button>
+          <input
+            type="password"
+            className="px-4 py-2 bg-gray-700 rounded-md"
+            value={token}
+            placeholder="OpenAI API key"
+            onChange={(e) => setToken(e.target.value)}
+          />
+          <input
+            className="px-4 py-2 bg-gray-700 rounded-md"
+            value={lang}
+            placeholder="Optional language code"
+            onChange={(e) => setLang(e.target.value)}
+          />
       </div>
       <div
         className={`bg-[rgba(20,20,20,0.8)] backdrop-blur-xl p-8 rounded-sm absolute left-0 top-0 bottom-0 transition-all w-[75vw] sm:w-[33vw] ${
